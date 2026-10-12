@@ -16,9 +16,10 @@
 
 ## 首次准备与启动
 
-在仓库根目录上传并解压随附的 `实验2数据_CloudStudio上传.zip`，解压后应有 `实验2数据/train/annotations.json`、`实验2数据/train/images/`、`实验2数据/同类测试/images/` 和 `实验2数据/鲁棒测试/images/`，不要多套一层仓库目录。
+在仓库根目录上传随附的 `实验2数据_CloudStudio上传.zip`，使用下面的 Python 命令解压。部分工作空间的 `unzip` 会把 UTF-8 中文文件名解成乱码；Python 标准库会读取压缩包中的 UTF-8 标记。解压后应有 `实验2数据/train/annotations.json`、`实验2数据/train/images/`、`实验2数据/同类测试/images/` 和 `实验2数据/鲁棒测试/images/`，不要多套一层仓库目录。
 
 ```bash
+python -m zipfile -e 实验2数据_CloudStudio上传.zip .
 bash setup.sh
 cp .env.example .env
 # 在编辑器中配置 .env；没有模型接口也能先运行标注软件。
