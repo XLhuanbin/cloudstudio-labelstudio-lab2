@@ -62,7 +62,9 @@ def main():
     env["LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT"] = str(ROOT)
     env["LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED"] = "true"
     env["LABEL_STUDIO_URL"] = f"http://127.0.0.1:{args.port}"
-    env["LABEL_STUDIO_ML_TIMEOUT"] = "3600"
+    # Label Studio 1.13 reads ML_TIMEOUT_PREDICT, not LABEL_STUDIO_ML_TIMEOUT.
+    env.setdefault("ML_TIMEOUT_PREDICT", "3600")
+    env["ML_PREDICTION_CACHE_DIR"] = str(state / "predictions")
     # Empty overrides in .env must not override Label Studio's default host or login.
     for key in ("LABEL_STUDIO_HOST", "LABEL_STUDIO_USERNAME", "LABEL_STUDIO_PASSWORD"):
         if not env.get(key):

@@ -10,6 +10,10 @@ import os
 import re
 import math
 import time
+import hashlib
+import threading
+from concurrent.futures import Future
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -244,6 +248,9 @@ class PaddleOCRProvider(Provider):
 
 class NewModel(LabelStudioMLBase):
     """Cloud Studio ML backend entry point."""
+    _prediction_guard = threading.Lock()
+    _pending_predictions = {}
+    _completed_predictions = {}
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.vision = Provider("QWEN_VL_API_URL", "QWEN_VL_API_KEY")
@@ -258,11 +265,64 @@ class NewModel(LabelStudioMLBase):
     def _prediction(self, task: dict) -> dict:
         value = task.get("data", {}).get("image", "")
         raw = image_bytes(value)
+        identity = {"version": "crop-ocr-v2", "project": task.get("project"),
+                    "task": task.get("id"), "image": hashlib.sha256(raw).hexdigest(),
+                    "vision_url": self.vision.url, "vision_model": self.vision.model,
+                    "ocr_url": self.ocr.url, "ocr_model": self.ocr.model,
+                    "ocr_provider": type(self.ocr).__name__, "prompt": PROMPT}
+        key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
+        directory = os.getenv("ML_PREDICTION_CACHE_DIR", "").strip()
+        cache_path = Path(directory) / (key + ".json") if directory else None
+        with self._prediction_guard:
+            cached = self._completed_predictions.get(key)
+            if cached is None and cache_path and cache_path.is_file():
+                try:
+                    stored = json.loads(cache_path.read_text(encoding="utf-8"))
+                    if stored.get("key") == key and isinstance(stored.get("prediction", {}).get("result"), list):
+                        cached = stored["prediction"]
+                except (OSError, ValueError, AttributeError):
+                    pass
+            if cached is not None:
+                print(f"Task {task.get('id', '?')}: using completed prediction cache", flush=True)
+                return deepcopy(cached)
+            future = self._pending_predictions.get(key)
+            leader = future is None
+            if leader:
+                future = Future()
+                self._pending_predictions[key] = future
+        if not leader:
+            print(f"Task {task.get('id', '?')}: prediction already running; waiting for the same result", flush=True)
+            return deepcopy(future.result())
+        try:
+            result = self._run_prediction(task, raw)
+            if result.get("result"):
+                if cache_path:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = cache_path.with_suffix(".tmp")
+                    temporary.write_text(json.dumps({"key": key, "task_id": task.get("id"),
+                        "prediction": result}, ensure_ascii=False), encoding="utf-8")
+                    temporary.replace(cache_path)
+                with self._prediction_guard:
+                    if len(self._completed_predictions) >= 128:
+                        self._completed_predictions.pop(next(iter(self._completed_predictions)))
+                    self._completed_predictions[key] = deepcopy(result)
+            future.set_result(result)
+            return deepcopy(result)
+        except BaseException as exc:
+            future.set_exception(exc)
+            raise
+        finally:
+            with self._prediction_guard:
+                self._pending_predictions.pop(key, None)
+
+    def _run_prediction(self, task: dict, raw: bytes) -> dict:
+        started = time.monotonic()
         with Image.open(BytesIO(raw)) as im:
             image = im.convert("RGB")
         width, height = image.size
         if not self.vision.url:
             raise RuntimeError("QWEN_VL_API_URL is not configured; no model inference has been run")
+        print(f"Task {task.get('id', '?')}: requesting vision proposals", flush=True)
         proposals = extract_json(self.vision.chat(raw, PROMPT))
         if isinstance(proposals, dict): proposals = proposals.get("boxes", proposals.get("items", []))
         if not isinstance(proposals, list): proposals = []
@@ -286,6 +346,7 @@ class NewModel(LabelStudioMLBase):
                 text = self._ocr_crop(image, x, y, w, h) or text
             if text:
                 results.append({"id": rid, "from_name": "formula_text", "to_name": "image", "type": "textarea", "value": {"text": [text]}, "score": score, "original_width": width, "original_height": height, "image_rotation": 0})
+        print(f"Task {task.get('id', '?')}: prediction complete; {len(results)} regions; elapsed={time.monotonic() - started:.1f}s", flush=True)
         return {"result": results, "model_version": "qwen-vl-plus-ocr"}
 
     def _ocr_crop(self, image: Image.Image, x: float, y: float, w: float, h: float) -> str:

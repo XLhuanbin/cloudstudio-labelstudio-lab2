@@ -2,6 +2,8 @@
 
 用于在腾讯云 Cloud Studio 运行 Label Studio 和 ML backend，完成算术练习册的框选预标注与 OCR 文字精标。视觉/OCR 推理调用外部兼容接口；只运行标注服务时可使用 CPU 环境。
 
+一张练习册可能需要逐框完成 30 次 OCR。启动器使用 Label Studio 的 `ML_TIMEOUT_PREDICT=3600`，避免默认 100 秒超时；同一图片的并发请求共用一次推理，成功结果保存到 `.runtime/predictions`，再次请求可直接回填。图片内容、模型或接口地址变化时会重新推理。密钥不写入缓存。详细进度使用 `tail -f .runtime/ml_backend.log` 查看。
+
 仓库只包含代码、启动配置和使用说明。教师报告、课程图片、参考答案、登录账号、数据库和模型密钥均不纳入 Git；课程数据另行上传到工作空间。
 
 ## 从 Git 仓库创建应用
