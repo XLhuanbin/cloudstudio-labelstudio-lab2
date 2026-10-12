@@ -45,13 +45,36 @@ set +a
 
 脚本创建“实验2 数据标注实践”项目，写入标注界面，授权课程图片目录，并导入训练集100张、同类测试10张、鲁棒测试10张。重复运行会按图片路径跳过已有任务。ML backend 使用同一工作空间内部的 `http://127.0.0.1:9090`，不需要把9090作为公开预览端口。
 
-如果选择手动操作，先用 `配置/label_config.xml` 创建项目；在 Settings → Cloud Storage 添加 Local files，Path 填工作空间中 `实验2数据` 的绝对路径，只授权读取，不同步扫描；然后导入 `.runtime/tasks.json`。在 Settings → Machine Learning 添加上面的内部后端地址。
+如果选择手动操作，先用 `配置/label_config.xml` 创建项目；在项目 Settings → Cloud Storage 添加 Local files，Path 填工作空间中 `实验2数据` 的绝对路径，只授权读取，不同步扫描；然后导入 `.runtime/tasks.json`。在项目 Settings → **Model** → **Connect Model** 添加上面的内部后端地址。固定的 Label Studio 1.13.1 版本将该页命名为 Model；页面路径为 `/projects/项目ID/settings/ml`。
 
 ## 配置视觉模型与OCR
 
-编辑 `.env` 中的 `QWEN_VL_API_URL`、`QWEN_VL_API_KEY`、`QWEN_VL_MODEL`、`OCR_API_URL`、`OCR_API_KEY` 和 `OCR_MODEL`，停止并重新运行 `bash start.sh`。URL 是完整的 `/chat/completions` 请求地址；模型名称应与服务商实际开放的名称一致。
+编辑 `.env` 中的 `QWEN_VL_API_URL`、`QWEN_VL_API_KEY`、`QWEN_VL_MODEL`、`OCR_API_URL`、`OCR_API_KEY`、`OCR_MODEL` 和 `OCR_API_STYLE`，停止并重新运行 `bash start.sh`。Qwen URL 是完整的 `/chat/completions` 请求地址；模型名称应与服务商实际开放的名称一致。
 
-两个接口都需要支持 OpenAI-compatible 的图片消息请求及 `choices[0].message.content` 响应。不同供应商的原生 PaddleOCR/HunyuanOCR 接口可能采用不同协议，届时需根据实际接口调整适配器。视觉响应内容是 JSON 数组：
+Qwen 接口需要支持 OpenAI-compatible 的图片消息请求及 `choices[0].message.content` 响应。OCR 有两种方式：默认 `OCR_API_STYLE="openai"` 使用相同的兼容聊天协议；设置为 `paddleocr` 时，使用 AI Studio 的 PaddleOCR-VL **同步**原生接口，发送 Base64 图片和 `Authorization: token ...`，读取 `result.layoutParsingResults` 中的识别内容。异步任务接口需要另外适配，不要填写异步提交任务的 URL。
+
+### 使用免费或试用额度
+
+以下入口于2026年10月12日核对。实际可用额度、有效期和计费规则以账号控制台为准。
+
+1. Qwen-VL：前往[阿里云百炼](https://bailian.console.aliyun.com/)，选择华北2（北京），查看视觉模型和新人免费额度，再按[官方指引](https://help.aliyun.com/zh/model-studio/get-api-key)创建 API Key。新人额度有效期90天；请开启“免费额度用完即停”。这里选用控制台中可调用且仍有免费额度的 Qwen-VL 模型，例如 `qwen2.5-vl-72b-instruct`；复制模型实际名称，不沿用其他服务商的命名。
+2. PaddleOCR-VL：登录[百度 AI Studio PaddleOCR](https://aistudio.baidu.com/paddleocr/task)，选择 PaddleOCR-VL，在“API调用示例”中获取同步接口的 `API_URL` 和 `TOKEN`。也可在[访问令牌页](https://aistudio.baidu.com/account/accessToken)管理 Token。[官方配额文档](https://ai.baidu.com/ai-doc/AISTUDIO/Xmjclapam)当前写明每用户每模型每天最多解析20000页；请以账号实际权限为准。
+
+配置示例（密钥仅写入 `.env`）：
+
+```dotenv
+QWEN_VL_API_URL="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+QWEN_VL_API_KEY="你的百炼API Key"
+QWEN_VL_MODEL="qwen2.5-vl-72b-instruct"
+OCR_API_STYLE="paddleocr"
+OCR_API_URL="飞桨API调用示例中的完整同步API_URL"
+OCR_API_KEY="飞桨访问令牌TOKEN"
+OCR_MODEL="PaddleOCR-VL"
+```
+
+飞桨模型由所选服务 URL 决定，`OCR_MODEL` 不会将该服务切换成其他模型。模型可能输出 LaTeX 等公式表示，需人工核对识别文字。适配器通过模拟响应验证；真实推理仍需配置本人账号的接口后验证。项目运行在腾讯云 Cloud Studio，外部推理接口可来自以上平台。
+
+视觉响应内容是 JSON 数组：
 
 ```json
 [{"x": 5, "y": 10, "width": 30, "height": 5, "text": "50+40=90", "score": 0.9}]

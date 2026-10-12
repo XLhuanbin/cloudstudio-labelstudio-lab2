@@ -84,12 +84,68 @@ class Provider:
         return content
 
 
+class PaddleOCRProvider(Provider):
+    """Native synchronous PaddleOCR-VL API from AI Studio's API example."""
+
+    def chat(self, image: bytes, prompt: str) -> str:
+        if not self.url:
+            return ""
+        headers = {"Content-Type": "application/json"}
+        if self.key:
+            headers["Authorization"] = "token " + self.key
+        payload = {
+            "file": base64.b64encode(image).decode("ascii"),
+            "fileType": 1,
+            "useDocOrientationClassify": False,
+            "useDocUnwarping": False,
+            "useChartRecognition": False,
+            "useLayoutDetection": False,
+            "promptLabel": "ocr",
+            "prettifyMarkdown": False,
+        }
+        response = requests.post(self.url, headers=headers, json=payload, timeout=180)
+        response.raise_for_status()
+        body = response.json()
+        if not isinstance(body, dict):
+            raise RuntimeError("PaddleOCR-VL returned an invalid response object")
+        if body.get("errorCode", 0) != 0:
+            raise RuntimeError("PaddleOCR-VL API error: " + str(body.get("errorMsg", body["errorCode"])))
+        result = body.get("result")
+        pages = result.get("layoutParsingResults") if isinstance(result, dict) else None
+        if not isinstance(pages, list):
+            raise RuntimeError("PaddleOCR-VL response is missing result.layoutParsingResults; use the synchronous API URL")
+        texts = []
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            # Prefer raw block content, preserving the model's symbols and answers.
+            pruned = page.get("prunedResult", {})
+            blocks = pruned.get("parsing_res_list", []) if isinstance(pruned, dict) else []
+            block_texts = [block["block_content"].strip() for block in blocks
+                           if isinstance(block, dict) and isinstance(block.get("block_content"), str)
+                           and block["block_content"].strip()] if isinstance(blocks, list) else []
+            if block_texts:
+                texts.extend(block_texts)
+            else:
+                markdown = page.get("markdown", {})
+                text = markdown.get("text", "") if isinstance(markdown, dict) else ""
+                if isinstance(text, str) and text.strip():
+                    texts.append(text.strip())
+        if not texts:
+            raise RuntimeError("PaddleOCR-VL returned no recognized text for this crop")
+        return "\n".join(texts)
+
+
 class NewModel(LabelStudioMLBase):
     """Cloud Studio ML backend entry point."""
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.vision = Provider("QWEN_VL_API_URL", "QWEN_VL_API_KEY")
-        self.ocr = Provider("OCR_API_URL", "OCR_API_KEY", "OCR_MODEL", "HunyuanOCR")
+        style = os.getenv("OCR_API_STYLE", "openai").strip().lower()
+        if style not in {"openai", "paddleocr"}:
+            raise ValueError("OCR_API_STYLE must be openai or paddleocr")
+        provider = PaddleOCRProvider if style == "paddleocr" else Provider
+        self.ocr = provider("OCR_API_URL", "OCR_API_KEY", "OCR_MODEL", "HunyuanOCR")
 
     def _prediction(self, task: dict) -> dict:
         value = task.get("data", {}).get("image", "")
