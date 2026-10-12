@@ -1,0 +1,9 @@
+# Cloud Studio 推荐使用 Python 3.10 或 3.11。
+# 固定本机已验证的关键依赖；完整 Linux 安装仍需云端执行确认。
+label-studio==1.13.1
+label-studio-ml==1.0.9
+label-studio-sdk==1.0.5
+numpy==1.24.4
+scipy==1.10.1
+Pillow==10.4.0
+requests==2.32.4

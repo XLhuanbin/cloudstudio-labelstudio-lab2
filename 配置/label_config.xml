@@ -1,0 +1,8 @@
+<View>
+  <Image name="image" value="$image" zoom="true" zoomControl="true"/>
+  <RectangleLabels name="formula_box" toName="image">
+    <Label value="算式" background="#1f77b4"/>
+  </RectangleLabels>
+  <TextArea name="formula_text" toName="image" perRegion="true" editable="true"
+            required="false" maxSubmissions="1" placeholder="OCR 识别结果，可人工修正"/>
+</View>
