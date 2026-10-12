@@ -51,14 +51,14 @@ set +a
 
 编辑 `.env` 中的 `QWEN_VL_API_URL`、`QWEN_VL_API_KEY`、`QWEN_VL_MODEL`、`OCR_API_URL`、`OCR_API_KEY`、`OCR_MODEL` 和 `OCR_API_STYLE`，停止并重新运行 `bash start.sh`。Qwen URL 是完整的 `/chat/completions` 请求地址；模型名称应与服务商实际开放的名称一致。
 
-Qwen 接口需要支持 OpenAI-compatible 的图片消息请求及 `choices[0].message.content` 响应。OCR 有两种方式：默认 `OCR_API_STYLE="openai"` 使用相同的兼容聊天协议；设置为 `paddleocr` 时，使用 AI Studio 的 PaddleOCR-VL **同步**原生接口，发送 Base64 图片和 `Authorization: token ...`，读取 `result.layoutParsingResults` 中的识别内容。异步任务接口需要另外适配，不要填写异步提交任务的 URL。
+Qwen 接口需要支持 OpenAI-compatible 的图片消息请求及 `choices[0].message.content` 响应。OCR 有两种方式：`OCR_API_STYLE="openai"` 使用兼容聊天协议；`paddleocr` 使用 AI Studio 的 PaddleOCR-VL 原生接口。旧版同步接口发送 Base64 图片和 `Authorization: token ...`。新版 `/api/v2/ocr/jobs` 上传裁剪图片（multipart），发送 Bearer 访问令牌与 `OCR_MODEL`，然后查询任务并下载 JSONL 识别结果。新版地址会自动选择原生适配器，即使 `.env` 仍是默认的 `openai` 类型。每个裁剪图提交一个任务；单个任务最多查询180秒，报错时不会重复提交。
 
 ### 使用免费或试用额度
 
 以下入口于2026年10月12日核对。实际可用额度、有效期和计费规则以账号控制台为准。
 
 1. Qwen-VL：前往[阿里云百炼](https://bailian.console.aliyun.com/)，选择华北2（北京），查看视觉模型和新人免费额度，再按[官方指引](https://help.aliyun.com/zh/model-studio/get-api-key)创建 API Key。新人额度有效期90天；请开启“免费额度用完即停”。这里选用控制台中可调用且仍有免费额度的 Qwen-VL 模型，例如 `qwen2.5-vl-72b-instruct`；复制模型实际名称，不沿用其他服务商的命名。
-2. PaddleOCR-VL：登录[百度 AI Studio PaddleOCR](https://aistudio.baidu.com/paddleocr/task)，选择 PaddleOCR-VL，在“API调用示例”中获取同步接口的 `API_URL` 和 `TOKEN`。也可在[访问令牌页](https://aistudio.baidu.com/account/accessToken)管理 Token。[官方配额文档](https://ai.baidu.com/ai-doc/AISTUDIO/Xmjclapam)当前写明每用户每模型每天最多解析20000页；请以账号实际权限为准。
+2. PaddleOCR-VL：登录[百度 AI Studio PaddleOCR](https://aistudio.baidu.com/paddleocr/task)，选择 PaddleOCR-VL-1.6，在“API调用示例”中取得 `TOKEN` 和任务接口地址（新版示例叫 `JOB_URL`，旧版叫 `API_URL`）。也可在[访问令牌页](https://aistudio.baidu.com/account/accessToken)管理 Token。[官方异步API文档](https://ai.baidu.com/ai-doc/AISTUDIO/fml7mozw5)及官方 SDK 确认新版任务地址为 `https://paddleocr.aistudio-app.com/api/v2/ocr/jobs`。[官方配额文档](https://ai.baidu.com/ai-doc/AISTUDIO/Xmjclapam)当前写明每用户每模型每天最多解析20000页；请以账号实际权限为准。
 
 配置示例（密钥仅写入 `.env`）：
 
@@ -67,12 +67,24 @@ QWEN_VL_API_URL="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completi
 QWEN_VL_API_KEY="你的百炼API Key"
 QWEN_VL_MODEL="qwen2.5-vl-72b-instruct"
 OCR_API_STYLE="paddleocr"
-OCR_API_URL="飞桨API调用示例中的完整同步API_URL"
+OCR_API_URL="https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
 OCR_API_KEY="飞桨访问令牌TOKEN"
-OCR_MODEL="PaddleOCR-VL"
+OCR_MODEL="PaddleOCR-VL-1.6"
 ```
 
-飞桨模型由所选服务 URL 决定，`OCR_MODEL` 不会将该服务切换成其他模型。模型可能输出 LaTeX 等公式表示，需人工核对识别文字。适配器通过模拟响应验证；真实推理仍需配置本人账号的接口后验证。项目运行在腾讯云 Cloud Studio，外部推理接口可来自以上平台。
+新版任务接口由 `OCR_MODEL` 决定实际调用模型，必须填写服务端支持的名称（例如 `PaddleOCR-VL-1.6`）；不要保留模板默认的 `HunyuanOCR`。旧版同步接口由所选服务 URL 决定模型。模型可能输出 LaTeX 等公式表示，需人工核对识别文字。适配器通过模拟响应验证；真实推理仍需配置本人账号的接口后验证。项目运行在腾讯云 Cloud Studio，外部推理接口可来自以上平台。
+
+### 修改配置或更新代码后重启
+
+新开终端查看日志不会影响服务。更新 `.env` 或代码后，需要在原来运行 `bash start.sh` 的终端按 `Ctrl+C`，停止服务后执行：
+
+```bash
+cd /workspace
+git pull --ff-only
+bash start.sh
+```
+
+停止启动器不会删除 `.runtime/labelstudio` 数据库、课程图片或 `.env`。保留当前工作空间即可接着使用；无需重复导入。预测时在另一个终端执行 `tail -f .runtime/ml_backend.log` 查看算式裁剪及 Paddle 任务进度，结束日志查看可按 `Ctrl+C`，只停止日志查看。
 
 视觉响应内容是 JSON 数组：
 

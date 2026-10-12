@@ -9,9 +9,10 @@ import json
 import os
 import re
 import math
+import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
 from PIL import Image
@@ -64,6 +65,10 @@ def data_uri(raw: bytes) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
 
 
+def paddle_jobs_url(url: str) -> bool:
+    return urlparse(url).path.rstrip("/") == "/api/v2/ocr/jobs"
+
+
 class Provider:
     def __init__(self, url_var: str, key_var: str = "", model_var: str = "QWEN_VL_MODEL", default_model: str = "Qwen2.5-VL-72B-Instruct"):
         self.url = os.getenv(url_var, "").strip()
@@ -85,11 +90,41 @@ class Provider:
 
 
 class PaddleOCRProvider(Provider):
-    """Native synchronous PaddleOCR-VL API from AI Studio's API example."""
+    """PaddleOCR-VL provider for both legacy sync and current async APIs."""
 
     def chat(self, image: bytes, prompt: str) -> str:
         if not self.url:
             return ""
+        if paddle_jobs_url(self.url):
+            return self._chat_v2(image)
+        return self._chat_legacy(image)
+
+    @staticmethod
+    def _text_from_result(result: Any) -> str:
+        """Extract readable text from one PaddleOCR-VL JSON result."""
+        pages = result.get("layoutParsingResults") if isinstance(result, dict) else None
+        if not isinstance(pages, list):
+            return ""
+        texts = []
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            pruned = page.get("prunedResult", {})
+            blocks = pruned.get("parsing_res_list", []) if isinstance(pruned, dict) else []
+            block_texts = [block["block_content"].strip() for block in blocks
+                           if isinstance(block, dict) and isinstance(block.get("block_content"), str)
+                           and block["block_content"].strip()] if isinstance(blocks, list) else []
+            if block_texts:
+                texts.extend(block_texts)
+                continue
+            markdown = page.get("markdown", {})
+            text = markdown.get("text", "") if isinstance(markdown, dict) else ""
+            if isinstance(text, str) and text.strip():
+                texts.append(text.strip())
+        return "\n".join(texts)
+
+    def _chat_legacy(self, image: bytes) -> str:
+        """Legacy synchronous endpoint returned result.layoutParsingResults."""
         headers = {"Content-Type": "application/json"}
         if self.key:
             headers["Authorization"] = "token " + self.key
@@ -114,26 +149,97 @@ class PaddleOCRProvider(Provider):
         pages = result.get("layoutParsingResults") if isinstance(result, dict) else None
         if not isinstance(pages, list):
             raise RuntimeError("PaddleOCR-VL response is missing result.layoutParsingResults; use the synchronous API URL")
-        texts = []
-        for page in pages:
-            if not isinstance(page, dict):
-                continue
-            # Prefer raw block content, preserving the model's symbols and answers.
-            pruned = page.get("prunedResult", {})
-            blocks = pruned.get("parsing_res_list", []) if isinstance(pruned, dict) else []
-            block_texts = [block["block_content"].strip() for block in blocks
-                           if isinstance(block, dict) and isinstance(block.get("block_content"), str)
-                           and block["block_content"].strip()] if isinstance(blocks, list) else []
-            if block_texts:
-                texts.extend(block_texts)
-            else:
-                markdown = page.get("markdown", {})
-                text = markdown.get("text", "") if isinstance(markdown, dict) else ""
-                if isinstance(text, str) and text.strip():
-                    texts.append(text.strip())
-        if not texts:
-            raise RuntimeError("PaddleOCR-VL returned no recognized text for this crop")
-        return "\n".join(texts)
+        text = self._text_from_result(result)
+        if not text:
+            raise RuntimeError("PaddleOCR-VL returned no recognized text")
+        return text
+
+    def _chat_v2(self, image: bytes) -> str:
+        """Current AI Studio API: multipart submit, poll, then download JSONL."""
+        if not self.model.startswith("PaddleOCR-VL"):
+            raise RuntimeError("Set OCR_MODEL to PaddleOCR-VL-1.6 (or your selected PaddleOCR-VL version) for the jobs API")
+        if not self.key:
+            raise RuntimeError("OCR_API_KEY is not configured for the PaddleOCR jobs API")
+        headers = {"Authorization": "Bearer " + self.key}
+        options = {
+            "useDocOrientationClassify": False,
+            "useDocUnwarping": False,
+            "useLayoutDetection": False,
+            "promptLabel": "ocr",
+            "useChartRecognition": False,
+            "prettifyMarkdown": False,
+        }
+        data = {"model": self.model,
+                "optionalPayload": json.dumps(options, ensure_ascii=False)}
+        files = {"file": ("crop.jpg", image, "image/jpeg")}
+        jobs_url = self.url.rstrip("/")
+        response = requests.post(jobs_url, headers=headers, data=data, files=files, timeout=180)
+        job_id = self._job_data(response, "submit").get("jobId")
+        if not isinstance(job_id, str) or not job_id:
+            raise RuntimeError("PaddleOCR-VL submit response has no data.jobId")
+        print(f"PaddleOCR submitted {job_id}; model={self.model}", flush=True)
+        status_url = jobs_url + "/" + quote(job_id, safe="")
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            remaining = max(0.1, deadline - time.monotonic())
+            status_response = requests.get(status_url, headers=headers, timeout=min(60, remaining))
+            job = self._job_data(status_response, "status")
+            state = job.get("state")
+            if state == "done":
+                urls = job.get("resultUrl", {}) or {}
+                json_url = urls.get("jsonUrl") if isinstance(urls, dict) else None
+                if not json_url:
+                    raise RuntimeError("PaddleOCR-VL completed without data.resultUrl.jsonUrl")
+                result_response = requests.get(json_url, timeout=120)
+                if not result_response.ok:
+                    raise RuntimeError(f"PaddleOCR-VL result download failed with HTTP {result_response.status_code}")
+                texts = []
+                for line in result_response.text.splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        raise RuntimeError("PaddleOCR-VL returned invalid JSONL") from None
+                    if not isinstance(record, dict):
+                        raise RuntimeError("PaddleOCR-VL JSONL record must be an object")
+                    text = self._text_from_result(record.get("result", record))
+                    if text:
+                        texts.append(text)
+                if not texts:
+                    raise RuntimeError("PaddleOCR-VL returned no recognized text")
+                print(f"PaddleOCR completed {job_id}", flush=True)
+                return "\n".join(texts)
+            if state == "failed":
+                message = str(job.get("errorMsg", "unknown error")).replace(self.key, "[redacted]")
+                raise RuntimeError("PaddleOCR-VL job failed: " + message[:300])
+            if state not in {"pending", "running"}:
+                raise RuntimeError("PaddleOCR-VL returned an invalid job state")
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(3, remaining))
+        raise RuntimeError("PaddleOCR-VL job timed out after 180 seconds")
+
+    @staticmethod
+    def _job_data(response: requests.Response, action: str) -> dict:
+        try:
+            body = response.json()
+        except ValueError:
+            raise RuntimeError(f"PaddleOCR-VL {action} returned HTTP {response.status_code} without JSON") from None
+        if not isinstance(body, dict):
+            raise RuntimeError(f"PaddleOCR-VL {action} response must be a JSON object")
+        code = body.get("code", 0)
+        if not response.ok or code != 0:
+            # Return useful error codes without echoing uploaded content or credentials.
+            reasons = {10001: "empty file", 10004: "unsupported file format",
+                       10007: "invalid OCR_MODEL", 10008: "invalid optionalPayload",
+                       12001: "daily quota exceeded", 12002: "requests too frequent"}
+            reason = reasons.get(code, "check API token, model and account quota") if isinstance(code, int) else "invalid API response"
+            raise RuntimeError(f"PaddleOCR-VL {action} failed: HTTP {response.status_code}, code={code if isinstance(code, int) else 'invalid'}; {reason}")
+        data = body.get("data")
+        if not isinstance(data, dict):
+            raise RuntimeError(f"PaddleOCR-VL {action} response has no data object")
+        return data
 
 
 class NewModel(LabelStudioMLBase):
@@ -144,8 +250,10 @@ class NewModel(LabelStudioMLBase):
         style = os.getenv("OCR_API_STYLE", "openai").strip().lower()
         if style not in {"openai", "paddleocr"}:
             raise ValueError("OCR_API_STYLE must be openai or paddleocr")
-        provider = PaddleOCRProvider if style == "paddleocr" else Provider
-        self.ocr = provider("OCR_API_URL", "OCR_API_KEY", "OCR_MODEL", "HunyuanOCR")
+        is_jobs = paddle_jobs_url(os.getenv("OCR_API_URL", "").strip())
+        provider = PaddleOCRProvider if style == "paddleocr" or is_jobs else Provider
+        default_model = "PaddleOCR-VL-1.6" if is_jobs else "HunyuanOCR"
+        self.ocr = provider("OCR_API_URL", "OCR_API_KEY", "OCR_MODEL", default_model)
 
     def _prediction(self, task: dict) -> dict:
         value = task.get("data", {}).get("image", "")
@@ -158,6 +266,7 @@ class NewModel(LabelStudioMLBase):
         proposals = extract_json(self.vision.chat(raw, PROMPT))
         if isinstance(proposals, dict): proposals = proposals.get("boxes", proposals.get("items", []))
         if not isinstance(proposals, list): proposals = []
+        print(f"Task {task.get('id', '?')}: received {len(proposals)} vision proposals", flush=True)
         results = []
         for idx, item in enumerate(proposals, 1):
             if not isinstance(item, dict): continue
@@ -173,6 +282,7 @@ class NewModel(LabelStudioMLBase):
             results.append({"id": rid, "from_name": "formula_box", "to_name": "image", "type": "rectanglelabels", "value": {"x": x, "y": y, "width": w, "height": h, "rotation": 0, "rectanglelabels": ["算式"]}, "score": score, "original_width": width, "original_height": height, "image_rotation": 0})
             text = str(item.get("text", "")).strip()
             if self.ocr.url:
+                print(f"Task {task.get('id', '?')}: OCR crop {idx}/{len(proposals)}", flush=True)
                 text = self._ocr_crop(image, x, y, w, h) or text
             if text:
                 results.append({"id": rid, "from_name": "formula_text", "to_name": "image", "type": "textarea", "value": {"text": [text]}, "score": score, "original_width": width, "original_height": height, "image_rotation": 0})
